@@ -1,4 +1,4 @@
-/*    #DtHack18 - WiFiScanOnly  
+/*    #DtHack18 - WiFiScanOnly  - For the Repository in gitHub
 
 Challenge:
 
@@ -91,13 +91,9 @@ static void showMetadata(struct SnifferPacket *snifferPacket) {
 	char addr[] = "00:00:00:00:00:00";
 	getMAC(addr, snifferPacket->data, 10);
 	Serial.print(" Peer MAC: ");
-	Serial.print(addr);
-
-	uint8_t SSID_length = snifferPacket->data[25];
-	Serial.print(" SSID: ");
-	printDataSpan(26, SSID_length, snifferPacket->data);
-
-	Serial.println();
+	Serial.println(addr);
+	
+	
 }
 
 /**
