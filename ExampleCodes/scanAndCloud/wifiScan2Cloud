@@ -9,6 +9,8 @@
  
  wifiScan
  switch from Promiscous MODE to Station Mode ( Pause ) and send this Data to XXXXX
+ Combine 2 codes ..This here and https://github.com/telekom/dthack18/blob/master/ExampleCodes/backend/backend.ino
+ 
  
  *
  *  sniff cycle is running 15 SEC / every 30 sec we interrupt/stopp sniffing and transfer data...approx!!
