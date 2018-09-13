@@ -1,0 +1,483 @@
+/*
+ *  SKETCH profile:
+ *
+ *  This is a example ..from an example CODE
+ *  Is showing the basic CONCEPT....
+ *  
+ *
+ * Challenge:
+ 
+ wifiScan
+ switch from Promiscous MODE to Station Mode ( Pause ) and send this Data to XXXXX
+ 
+ *
+ *  sniff cycle is running 15 SEC / every 30 sec we interrupt/stopp sniffing and transfer data...approx!!
+ *  
+ 
+ */
+
+#include <Arduino.h>
+#include <ESP8266HTTPClient.h>
+#include <ESP8266WiFi.h>
+#include "WiFiManager.h"
+#include <osapi.h>
+
+#define DISABLE 0
+#define ENABLE 1
+
+
+
+
+// your wifi
+
+const char* mySSID     = "NTG23R21ddddd81";
+const char* myLANpw = "myp123405**";
+String hostIP = "192.168.1.69";		
+String myRESTapiCALL =  "http://192.168.1.69:80/api/scghjanner";
+
+
+//**********   CONNECTION PARAMETER - E N D   *******************
+
+
+byte ledStatus = LOW;
+
+int currentChannel = 0;
+int myWifiChannel = 0;
+bool dataPackReady = false;
+int recursiveLoopCounter = 0;
+
+
+
+String data4RestServiceHeader = "espMAC;RSSI;Channel;peerMAC;SSID|\n";
+String data4RestService = data4RestServiceHeader;
+
+// The setup function is called once at startup of the sketch
+#define DATA_LENGTH 112
+
+#define TYPE_MANAGEMENT 0x00
+#define TYPE_CONTROL 0x01
+#define TYPE_DATA 0x02
+#define SUBTYPE_PROBE_REQUEST 0x04
+
+// TimeFrames
+
+#define CHANNEL_HOP_INTERVAL_MS 1000
+static os_timer_t channelHop_timer;
+
+#define MAXSPACE 50
+int ri = 0;
+String restArray[MAXSPACE];
+
+#define MAXSPACE_AP 50 // AP sniffer ARRAY
+int api = 0;
+String apArray[MAXSPACE_AP];
+
+struct RxControl
+{
+  signed rssi : 8; // signal intensity of packet
+  unsigned rate : 4;
+  unsigned is_group : 1;
+  unsigned : 1;
+  unsigned sig_mode : 2;       // 0:is 11n packet; 1:is not 11n packet;
+  unsigned legacy_length : 12; // if not 11n packet, shows length of packet.
+  unsigned damatch0 : 1;
+  unsigned damatch1 : 1;
+  unsigned bssidmatch0 : 1;
+  unsigned bssidmatch1 : 1;
+  unsigned MCS : 7; // if is 11n packet, shows the modulation and code used (range from 0 to 76)
+  unsigned CWB : 1; // if is 11n packet, shows if is HT40 packet or not
+  unsigned HT_length : 16; // if is 11n packet, shows length of packet.
+  unsigned Smoothing : 1;
+  unsigned Not_Sounding : 1;
+  unsigned : 1;
+  unsigned Aggregation : 1;
+  unsigned STBC : 2;
+  unsigned FEC_CODING : 1; // if is 11n packet, shows if is LDPC packet or not.
+  unsigned SGI : 1;
+  unsigned rxend_state : 8;
+  unsigned ampdu_cnt : 8;
+  unsigned channel : 4; // which channel this packet in.
+  unsigned : 12;
+};
+
+struct SnifferPacket
+{
+  struct RxControl rx_ctrl;
+  uint8_t data[DATA_LENGTH];
+  uint16_t cnt;
+  uint16_t len;
+};
+
+// std::string str2((char *)str1);
+
+
+
+String convertByteArray2String(uint8_t* str){
+    return String((char *)str);
+}
+
+
+
+String printDataSpan(uint16_t start, uint16_t size, uint8_t* data)
+{
+  String s = "";
+  char buf[1];
+
+  for (uint16_t i = start; i < DATA_LENGTH && i < start + size; i++) {
+    //Serial.write(data[i]);          // liegt hier als byte drin..this would write text to serial port...here byte!!..https://www.arduino.cc/en/Serial/Write
+    os_sprintf(buf, "%c", data[i]); // byte bzw hex  to char
+    s = s + buf;
+  }
+
+  // Serial.println(s);
+   return s;
+}
+
+static void
+getMAC(char* addr, uint8_t* data, uint16_t offset)
+{
+  sprintf(addr, "%02x:%02x:%02x:%02x:%02x:%02x", data[offset + 0], data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4], data[offset + 5]);
+}
+
+String deviceMacAddrOld = "";
+String ssidOld = "";
+
+static void showMetadata(SnifferPacket* snifferPacket)
+{
+
+  //Serial.println("showMetadata() - den buffer auslesen... ");
+
+  unsigned int frameControl =  ((unsigned int)snifferPacket->data[1] << 8) + snifferPacket->data[0];
+
+  // uint8_t version      = (frameControl & 0b0000000000000011) >> 0;
+  uint8_t frameType = (frameControl & 0b0000000000001100) >> 2;
+  uint8_t frameSubType = (frameControl & 0b0000000011110000) >> 4;
+  // uint8_t toDS         = (frameControl & 0b0000000100000000) >> 8;
+  // uint8_t fromDS       = (frameControl & 0b0000001000000000) >> 9;
+
+  // Only look for probe request packets
+  if (frameType != TYPE_MANAGEMENT || frameSubType != SUBTYPE_PROBE_REQUEST)
+  {
+	//Serial.println("showMetadata() - bedingung nicht erfüllt: frameType != TYPE_MANAGEMENT || frameSubType != SUBTYPE_PROBE_REQUEST --- RETURN ");
+    return;
+  }
+
+  //currentChannel = wifi_get_channel();
+  //Serial.print("showMetadata() - Treffer / Daten-Pakete auslesen! / current promiscuous Channel:  ");
+  //Serial.println(currentChannel);
+
+  // get my MAC addr - USE this to unify the Transferred Data ..MY ID !!
+  String myEspMAC = WiFi.macAddress();
+  //Serial.print("myEspMAC: ");
+  //Serial.print(myEspMAC);
+
+  //Serial.print(" RSSI: ");
+  //Serial.print(snifferPacket->rx_ctrl.rssi, DEC);
+
+  //Serial.print(" Ch: ");
+  //Serial.print(wifi_get_channel());
+
+  char deviceMacAddr[] = "00:00:00:00:00:00";
+  getMAC(deviceMacAddr, snifferPacket->data, 10);
+  //Serial.print(" Peer MAC: ");
+  //Serial.print(deviceMacAddr);
+
+  uint8_t SSID_length = snifferPacket->data[25];
+  //Serial.print(" SSID: ");
+  String ssid = printDataSpan(26, SSID_length, snifferPacket->data);     	// ck: 26.11.17..die funktion macht kein serial.write jetzt mehr...wir nehmen das string ergebnis!!
+
+
+  //concat the result into data4RestService:
+
+  String adrStr(deviceMacAddr);		// char array to string...is better to compare / https://stackoverflow.com/questions/8960087/how-to-convert-a-char-array-to-a-string
+
+  if ( adrStr != deviceMacAddrOld && ssid != ssidOld )
+  {
+	  data4RestService = data4RestService + myEspMAC + ";";							// my OWN MAC from the esp
+	  data4RestService = data4RestService + snifferPacket->rx_ctrl.rssi + ";";		// RSSI
+	  data4RestService = data4RestService + wifi_get_channel() + ";";				// wifi channel
+	  data4RestService = data4RestService + deviceMacAddr + ";";
+	  data4RestService = data4RestService + ssid;									// SSID
+	  data4RestService =  data4RestService + "|\n"; 								// sieht am ende wie eine CSV aus delimite= ;
+
+	  //store addr and ssid to compare next time
+
+	  deviceMacAddrOld = adrStr;
+	  ssidOld = ssid;
+
+	  //This Device we will store Now:
+
+	  Serial.print("myEspMAC: ");
+	  Serial.print(myEspMAC);
+
+	  Serial.print(" RSSI: ");
+	  Serial.print(snifferPacket->rx_ctrl.rssi, DEC);
+
+	  Serial.print(" Ch: ");
+	  Serial.print(wifi_get_channel());
+
+	  Serial.print(" Peer MAC: ");
+	  Serial.print(deviceMacAddr);
+
+	  Serial.print(" SSID: ");
+	  Serial.print(ssid);
+	  Serial.println();
+
+
+  }else {
+	  /*
+	  Serial.print("showMetadata() / Ignore DataSet! Mac and SSID are same as Dataset before WITHIN this cycle: ");
+	  String s = "old deviceMac= " + deviceMacAddrOld + " ssidOld= " + ssidOld;
+	  Serial.println(s);
+	  */
+	  //Serial.println();
+	  return;
+  }
+
+
+  // dataset for THIS CHANEL ist finished !!
+
+  if (data4RestService.length() >= 1000 && ri < MAXSPACE) { // chunks a n scans max
+    restArray[ri] = data4RestService;
+    data4RestService =
+      data4RestServiceHeader; // es fängt wieder eine gruppe an...quasi eine
+                              // neue csv...die später per POST verschickt wird
+    ++ri;
+  }
+
+
+}
+
+/**
+   * Callback for promiscuous mode
+   *Meaning of ICACHE_FLASH_ATTR: http://bbs.espressif.com/viewtopic.php?t=1183
+   *Die bedeutung ist wohl nicht ganz klar!?
+   */
+static void ICACHE_FLASH_ATTR
+sniffer_callback(uint8_t* buffer, uint16_t length)
+{
+	 //Serial.print("sniffer_callback()/length: ");
+	 //Serial.println(length);
+  struct SnifferPacket* snifferPacket = (struct SnifferPacket*)buffer;
+  showMetadata(snifferPacket);
+}
+
+/*
+hier ist ein toupper  aus JAPAN !! :-)
+http://nopnop2002.webcrow.jp/ESP8266/ESP8266-4.html
+Übergabe : ein char Array
+Result : EIn STRING  in UPPER CASE
+ENDLICH!!
+stringToUpper()18
+BSSID : 4C:09:D4:6C:9F:D3
+*/
+String
+stringToUpper(char arr[], int size)
+{
+
+  String result;
+  char smsg[size + 20];
+
+  int ii = 0;
+  // Serial.print("stringToUpper()");
+  // Serial.println(size);
+
+  for (ii = 0; ii < size; ii++) {
+    Serial.print((char)arr[ii]);
+    if (isalpha(arr[ii])) {
+      smsg[ii] = toupper(arr[ii]);
+    } else {
+      smsg[ii] = arr[ii];
+    } // end if
+  }   // end for
+
+  result = smsg; // Array to string
+  // Serial.print("stringToUpper()/result: ");
+  // Serial.println(result);
+  return result; // Result is a string in UPPER CASE
+}
+
+int
+sendDataPack()
+{
+  int returnResult = 0;
+  // read the struct with transfer Data
+  Serial.println("\nSendDataPack()/START - wifi_promiscuous_enable(DISABLE) - we transfer first the Handy-Device Data to MOTHER!");
+
+
+  wifi_promiscuous_enable(DISABLE);
+  os_timer_disarm(&channelHop_timer);
+  delay(100);
+  currentChannel = wifi_get_channel();
+  Serial.print("sendDataPack(): current promiscuous Channel: ");
+  Serial.println(currentChannel);
+
+  Serial.print("sendDataPack(): current Wifi-State: ");
+  Serial.println(WiFi.status());
+  delay(10);
+
+  wifi_set_channel(myWifiChannel);
+  delay(10);
+  Serial.print("sendDataPack(): switched to MY Channel: ");
+  Serial.println(wifi_get_channel());
+
+  if (WiFi.status() !=
+      WL_CONNECTED) { // FIX FOR USING 2.3.0 CORE (only .begin if not connected)
+    WiFi.begin(mySSID, myLANpw); // connect to the network
+    Serial.println("login into AP...");
+    Serial.print("setup()/WiFi.begin() new Wifi-State: ");
+    Serial.println(WiFi.status());
+  }
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    // Blink the LED
+    digitalWrite(2, ledStatus); // Write LED high/low
+    ledStatus = (ledStatus == HIGH) ? LOW : HIGH;
+    Serial.print("setup()/500erLoop/Waiting for connection/ new Wifi-State: ");
+    Serial.println(WiFi.status());
+  }
+
+  String jsonPayload = "";
+  int httpCode = 0;
+
+  // Mache den Rest einfach auch noch in das Array
+  restArray[ri] = data4RestService;
+
+  // chunks are now ALL in the array and we loop through it
+
+  if (WiFi.status() == WL_CONNECTED) { // Check WiFi connection status
+    Serial.println("WiFi.status(): WL_CONNECTED - OK");
+    HTTPClient http; // Declare object of class HTTPClient
+
+    // now we need to chunk the payload into 1000 byte chunks
+    for (int i = 0; i <= ri; ++i) {
+      Serial.print("for(int i = 0; i <= ri; ++i) / LOOP / i = ");
+      Serial.println(i);
+      jsonPayload = "{\"data\":\"" + restArray[i] + "\"}";
+      Serial.println(restArray[i]);
+      delay(10);
+      http.begin(myRESTapiCALL); // Specify request destination
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(jsonPayload);
+
+      if (httpCode >= 200 && httpCode <= 300) {
+        Serial.print("sendDataPack()/MobileDeviceData ok: OK../ httpCode = ");
+        Serial.println(httpCode);
+      } else {
+        Serial.print("sendDataPack(): recursive Loop..call again sendDataPack() E R R O R - httpCode: ");
+        Serial.println(httpCode);
+        if (recursiveLoopCounter < 3) {
+          recursiveLoopCounter++;
+          ri = 0;
+          data4RestService = "";
+          memset(restArray, 0, sizeof(restArray));
+          Serial.print( "sendDataPack(): recursive Loop..:  recursiveLoopCounter=  ");
+          Serial.println(recursiveLoopCounter);
+          delay(500);
+          sendDataPack();
+        } else {
+          ESP.restart();
+        }
+      }
+      http.end();
+    }
+    ri = 0;
+    data4RestService = "";
+    memset(restArray, 0, sizeof(restArray));
+  } else {
+    Serial.print("Error in WiFi connection: ");
+    Serial.println(WiFi.status());
+    returnResult = WiFi.status(); // in case of failure ...quick led flashing
+  }
+
+ 
+  delay(50);
+  wifi_promiscuous_enable(ENABLE); // prepare sniffing
+  os_timer_arm(&channelHop_timer, CHANNEL_HOP_INTERVAL_MS, 1);
+  return returnResult;
+}
+
+/**
+ * Callback for channel hoping
+ */
+void
+channelHop()
+{
+  // hoping channels 1-14
+  uint8 new_channel = wifi_get_channel() + 1;
+  if (new_channel > 14)
+  {
+    new_channel = 1;
+    deviceMacAddrOld = "";       // siehe showMetadata !! wir prüfen ob die selbe mac und ssid im 1-14er zyklus mehrfach kommen...wir nehmen pro zyklus nur EINE kombi
+    ssidOld = "";
+  }
+
+  wifi_set_channel(new_channel);
+}
+
+//----------- NON SNIFFER PART
+//----------------------------------------------------------------------------------------------
+
+void
+setup()
+{
+
+  Serial.begin(115200);
+  delay(10);
+  pinMode(2, OUTPUT);    // onBoard LED
+  digitalWrite(2, HIGH); // Write LED OFF !!
+
+  // https://github.com/esp8266/Arduino/issues/2735
+  Serial.println("setup(): initialize WIFI / setup(): the initial ..current Wifi-State:");
+  Serial.println(WiFi.status());
+
+  if (WiFi.status() !=
+      WL_CONNECTED) { // FIX FOR USING 2.3.0 CORE (only .begin if not connected)
+	  WiFi.begin(mySSID, myLANpw); // connect to the network
+    Serial.println("login into AP / setup()/WiFi.begin() new Wifi-State:");
+    Serial.println(WiFi.status());
+  }
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print("setup()/500erLoop/Waiting for connection/ new Wifi-State: ");
+    Serial.println(WiFi.status());
+  }
+
+  myWifiChannel =
+    wifi_get_channel(); // store the wifiChannel of the initial wifi connection
+  Serial.print("setup(): This is my initial wifi channel for the wifi connection: ");
+  Serial.println(myWifiChannel);
+
+  Serial.println("setup(): initialize WIFI... - DONE!!");
+  delay(2000);
+  sendDataPack();
+
+  // Serial connection
+  Serial.println(
+    "setup(): start & set Station_Mode & wifi_promiscuous_enable(ENABLE)...");
+  wifi_set_opmode(STATION_MODE);
+  wifi_set_channel(1);
+  wifi_promiscuous_enable(DISABLE);
+  delay(10);
+  wifi_set_promiscuous_rx_cb(sniffer_callback);
+  delay(10);
+  wifi_promiscuous_enable(ENABLE);
+  Serial.println("setup(): start & set Station_Mode & "
+                 "wifi_promiscuous_enable(ENABLE)... - DONE!");
+  delay(10);
+
+  // setup the channel hoping callback timer
+  os_timer_disarm(&channelHop_timer);
+  os_timer_setfn(&channelHop_timer, (os_timer_func_t*)channelHop, NULL);
+  os_timer_arm(&channelHop_timer, CHANNEL_HOP_INTERVAL_MS, 1);
+}
+
+void
+loop()
+{
+
+  sendDataPack();
+  Serial.println("loop() - Delay 30 sec - Start");
+  delay(20000);			// merke: DAS ist nur die äußere Klammer/schleife...der channel_Hop_timer regelt die sniffer-kanal durchläufe...ALLE 30 sec soll dann gesendet werden
+  Serial.println("loop() - Delay 30 sec - Stop");
+}
